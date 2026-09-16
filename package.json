@@ -1,0 +1,24 @@
+{
+  "name": "@piskill/pi-vaultwarden",
+  "version": "0.2.0",
+  "description": "Self-hosted Vaultwarden secrets for pi, omp, and Claude Code",
+  "keywords": ["pi-package", "pi-extension", "vaultwarden", "bitwarden", "secrets", "claude-code"],
+  "license": "MIT",
+  "author": "Daniel / EONSR",
+  "repository": { "type": "git", "url": "https://github.com/dinhkarate/pi-vaultwarden" },
+  "bugs": { "url": "https://github.com/dinhkarate/pi-vaultwarden/issues" },
+  "homepage": "https://github.com/dinhkarate/pi-vaultwarden#readme",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "bin": { "pi-vaultwarden": "./cli.ts" },
+  "files": ["index.ts", "core.ts", "cli.ts", "ui/", "LICENSE", "UPSTREAM.md", "README.md"],
+  "engines": { "node": ">=22.18.0" },
+  "pi": { "extensions": ["./index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "publishConfig": { "access": "public" }
+}
