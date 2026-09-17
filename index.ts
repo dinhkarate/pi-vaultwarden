@@ -78,6 +78,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let T: Builder;
   try { T = await getBuilder(pi); } catch { return; }
   const emptySchema = T.Object({});
+  try { await core.ensureSession(); } catch {}
+  await refreshEnv();
   pi.on("session_start", async () => { try { await core.ensureSession(); } catch {} await refreshEnv(); });
 
   pi.registerTool({
