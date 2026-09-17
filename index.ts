@@ -7,7 +7,7 @@ let currentEnv: Record<string, string> = {};
 
 type Builder = { Object: (p: Record<string, unknown>) => unknown; String: (o?: unknown) => unknown };
 async function getBuilder(pi: ExtensionAPI): Promise<Builder> {
-  const injected = (pi as unknown as { typebox?: Builder }).typebox;
+  const injected = (pi as unknown as { typebox?: { Type?: Builder } }).typebox?.Type;
   if (injected?.Object && injected?.String) return injected;
   const zod = (pi as unknown as { zod?: { object?: (p: Record<string, unknown>) => unknown; string?: (o?: unknown) => unknown } }).zod;
   if (zod?.object && zod?.string) return { Object: zod.object, String: zod.string };
@@ -19,6 +19,7 @@ async function getBuilder(pi: ExtensionAPI): Promise<Builder> {
   }
   throw new Error("No TypeBox-compatible schema builder available");
 }
+
 function applyEnv(next: Record<string, string>, previous: Record<string, string>): void {
   for (const key of Object.keys(previous)) if (!(key in next)) delete process.env[key];
   for (const [key, value] of Object.entries(next)) process.env[key] = value;
@@ -73,11 +74,9 @@ async function chooseItem(ctx: UiContext, title: string): Promise<{ id: string; 
   const id = await selectInBorderedPopup(ctx, { title, items: items.map((item) => ({ value: item.id, label: item.name })), maxVisible: 16 });
   return items.find((item) => item.id === id) ?? null;
 }
-
 export default async function (pi: ExtensionAPI): Promise<void> {
-  try { await core.ensureSession(); } catch {}
-  await refreshEnv();
-  const T = await getBuilder(pi);
+  let T: Builder;
+  try { T = await getBuilder(pi); } catch { return; }
   const emptySchema = T.Object({});
   pi.on("session_start", async () => { try { await core.ensureSession(); } catch {} await refreshEnv(); });
 
