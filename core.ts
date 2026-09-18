@@ -58,6 +58,75 @@ export async function bw(args: string[], opts: { input?: string; session?: strin
   return result.stdout;
 }
 
+// Secrets are resolved through one batched `bw list items` call instead of
+// spawning a ~3.5s `bw get password` process per auth entry. The map and the
+// unlocked-session check share the same TTL so repeated startup/resume passes
+// cost nothing until the window expires.
+export const SECRET_CACHE_TTL_MS = (() => {
+  const raw = process.env.PI_VAULTWARDEN_CACHE_TTL_MS;
+  const parsed = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60000;
+})();
+
+let vaultCache: { at: number; map: Map<string, string> } | null = null;
+let vaultPending: Promise<Map<string, string>> | null = null;
+let vaultMisses: Map<string, number> | null = null;
+let sessionPending: Promise<string> | null = null;
+let sessionVerifiedAt = 0;
+
+const BW_GET_PASSWORD_RE = /^bw\s+get\s+password\s+'([^']+)'\s*$/;
+
+function normalizeItemName(name: string): string { return name.trim().toLowerCase(); }
+export function invalidateSecretCache(): void {
+  vaultCache = null;
+  vaultPending = null;
+  vaultMisses = null;
+  sessionVerifiedAt = 0;
+}
+
+async function loadVaultPasswords(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const parsed = JSON.parse(await bw(["list", "items"])) as unknown;
+  if (!Array.isArray(parsed)) return map;
+  for (const raw of parsed) {
+    const item = raw as { name?: unknown; title?: unknown; login?: { password?: unknown } | null };
+    const name = typeof item.name === "string" ? item.name : typeof item.title === "string" ? item.title : "";
+    const password = item.login && typeof item.login.password === "string" ? item.login.password : "";
+    if (name && password) map.set(normalizeItemName(name), password);
+  }
+  return map;
+}
+
+function vaultPasswordsMap(): Promise<Map<string, string>> {
+  if (vaultCache && Date.now() - vaultCache.at < SECRET_CACHE_TTL_MS) return Promise.resolve(vaultCache.map);
+  if (!vaultPending) {
+    vaultPending = loadVaultPasswords()
+      .then((map) => { vaultCache = { at: Date.now(), map }; return map; })
+      .finally(() => { vaultPending = null; });
+  }
+  return vaultPending;
+}
+
+// Resolve a `!bw get password '<item>'` reference from the batched vault map.
+// string = hit; null = known-dead (skip the shell); undefined = fall through
+// to a direct shell call once per TTL window, so items created outside this
+// plugin self-heal while deleted/renamed references stop spawning a doomed
+// ~3.5s bw process on every refresh.
+async function resolveByVaultMap(itemName: string): Promise<string | null | undefined> {
+  const name = normalizeItemName(itemName);
+  let map: Map<string, string>;
+  try { map = await vaultPasswordsMap(); } catch { return undefined; }
+  const password = map.get(name);
+  if (password !== undefined) return password;
+  const missedAt = vaultMisses?.get(name);
+  if (missedAt === undefined || Date.now() - missedAt >= SECRET_CACHE_TTL_MS) {
+    if (!vaultMisses) vaultMisses = new Map();
+    vaultMisses.set(name, Date.now());
+    return undefined;
+  }
+  return null;
+}
+
 async function readKeychain(service: string): Promise<string | null> {
   const user = process.env.USER || process.env.LOGNAME || "";
   try {
@@ -92,8 +161,17 @@ async function rawStatus(session?: string): Promise<{ status: string; serverUrl:
   }
 }
 
-export async function ensureSession(): Promise<string> {
+export function ensureSession(): Promise<string> {
+  if (sessionPending) return sessionPending;
   const existing = process.env.BW_SESSION?.trim();
+  if (existing && Date.now() - sessionVerifiedAt < SECRET_CACHE_TTL_MS) return Promise.resolve(existing);
+  sessionPending = ensureSessionInner(existing)
+    .then((token) => { sessionVerifiedAt = Date.now(); return token; })
+    .finally(() => { sessionPending = null; });
+  return sessionPending;
+}
+
+async function ensureSessionInner(existing: string | undefined): Promise<string> {
   if (existing && (await rawStatus(existing)).status === "unlocked") return existing;
 
   try {
@@ -131,6 +209,7 @@ export async function ensureSession(): Promise<string> {
   await chmod(SESSION_FILE, 0o600);
   process.env.BW_SESSION = token;
   try { await bw(["sync", "--quiet"], { session: token }); } catch {}
+  invalidateSecretCache();
   return token;
 }
 
@@ -156,9 +235,15 @@ export async function resolveShellValue(raw: unknown): Promise<string | null> {
   const value = raw.trim();
   if (!value) return null;
   if (!value.startsWith("!")) return value;
+  const command = value.slice(1).trim();
+  if (command.startsWith("bw ")) { try { await ensureSession(); } catch {} }
+  const direct = BW_GET_PASSWORD_RE.exec(command);
+  if (direct) {
+    // One batched `bw list items` answers every `bw get password` reference.
+    const cached = await resolveByVaultMap(direct[1]);
+    if (cached !== undefined) return cached;
+  }
   try {
-    const command = value.slice(1).trim();
-    if (command.startsWith("bw ")) await ensureSession();
     const result = await runFile("/bin/sh", ["-c", command], { env: process.env, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
     return result.stdout.trim() || null;
   } catch { return null; }
@@ -223,13 +308,20 @@ export async function buildEnvMap(): Promise<Record<string, string>> {
   try {
     const targets = getAuthTargets();
     const merged = { ...(await readAuthEntries(targets.pi)), ...(await readAuthEntries(targets.omp)) };
-    const result: Record<string, string> = {};
+    const candidates: Array<{ key: string; raw: string | undefined }> = [];
     for (const [key, entry] of Object.entries(merged)) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(key) || PROVIDER_KEYS.has(key)) continue;
       const raw = typeof entry === "string" ? entry : entry && typeof entry === "object" && !Array.isArray(entry) ? (entry as { key?: unknown }).key : undefined;
-      const value = process.env[key] ?? await resolveShellValue(raw);
-      if (value !== null && value !== undefined && value !== "") result[key] = value;
+      candidates.push({ key, raw: typeof raw === "string" ? raw : undefined });
     }
+    // Resolvers share the cached session and the batched vault map, so the
+    // whole pass costs one `bw list items` even with dozens of entries.
+    const resolved = await Promise.all(candidates.map(async ({ key, raw }) => {
+      const value = process.env[key] ?? await resolveShellValue(raw);
+      return value !== null && value !== undefined && value !== "" ? ({ key, value } as const) : null;
+    }));
+    const result: Record<string, string> = {};
+    for (const pair of resolved) if (pair) result[pair.key] = pair.value;
     return result;
   } catch { return {}; }
 }
@@ -266,7 +358,7 @@ export async function createSecretItem(opts: { itemName: string; secret: string;
   let created: { id?: unknown };
   try { created = JSON.parse(output) as { id?: unknown }; } catch { throw new Error("Vaultwarden create returned invalid JSON"); }
   if (!created.id) throw new Error("Vaultwarden create returned no item id");
-  await bw(["sync", "--quiet"]);
+  await bw(["sync", "--quiet"]); invalidateSecretCache();
   return { id: String(created.id) };
 }
 
@@ -278,12 +370,13 @@ export async function rotateSecretItem(opts: { itemName: string; secret: string 
   const id = String(parsed.id ?? "");
   if (!id) throw new Error(`Vault item not found: ${opts.itemName}`);
   await bw(["edit", "item", id], { input: Buffer.from(JSON.stringify(parsed), "utf8").toString("base64") });
-  await bw(["sync", "--quiet"]);
+  await bw(["sync", "--quiet"]); invalidateSecretCache();
   return { id };
 }
 
 export async function deleteItem(id: string, permanent = false): Promise<void> {
   await bw(["delete", "item", id, ...(permanent ? ["--permanent"] : [])]);
+  invalidateSecretCache();
 }
 
 export async function readSecretFromInput(opts: { prompt: string; stdin: boolean }): Promise<string> {

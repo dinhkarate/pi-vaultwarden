@@ -1,6 +1,6 @@
 {
   "name": "@piskill/pi-vaultwarden",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Self-hosted Vaultwarden secrets for pi, omp, and Claude Code",
   "keywords": ["pi-package", "pi-extension", "vaultwarden", "bitwarden", "secrets", "claude-code"],
   "license": "MIT",

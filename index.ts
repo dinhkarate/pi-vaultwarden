@@ -19,24 +19,47 @@ async function getBuilder(pi: ExtensionAPI): Promise<Builder> {
   }
   throw new Error("No TypeBox-compatible schema builder available");
 }
-
-function applyEnv(next: Record<string, string>, previous: Record<string, string>): void {
-  for (const key of Object.keys(previous)) if (!(key in next)) delete process.env[key];
+function applyEnv(next: Record<string, string>): void {
+  for (const key of Object.keys(currentEnv)) if (!(key in next)) delete process.env[key];
   for (const [key, value] of Object.entries(next)) process.env[key] = value;
+  currentEnv = next;
 }
 
 function paths(): core.AuthTargets { return core.getAuthTargets(); }
 function mappedError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
-async function refreshEnv(): Promise<void> {
-  const previous = currentEnv;
-  currentEnv = await core.buildEnvMap();
-  applyEnv(currentEnv, previous);
+let refreshPromise: Promise<void> | null = null;
+let refreshTimer: { unref(): void } | null = null;
+
+// Startup must never await the vault: secrets hydrate in the background and the
+// agent keeps working with whatever environment it already had.
+function refreshEnv(): Promise<void> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try { await core.ensureSession(); } catch { scheduleRetry(); }
+      applyEnv(await core.buildEnvMap());
+    })().finally(() => { refreshPromise = null; });
+  }
+  return refreshPromise;
+}
+
+function scheduleRetry(delay = 5000): void {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void refreshEnv().catch(() => scheduleRetry(Math.min(delay * 2, 60000)));
+  }, delay);
+  if (typeof refreshTimer === "object" && "unref" in refreshTimer) refreshTimer.unref();
+}
+
+async function hydratedEnv(): Promise<Record<string, string>> {
+  await refreshEnv();
+  return currentEnv;
 }
 
 async function report(): Promise<{ report: string; details: Record<string, unknown> }> {
   const status = await core.getStatus();
-  const names = Object.keys(currentEnv);
+  const names = Object.keys(await hydratedEnv());
   const report = `Vaultwarden: ${status.status} (bw ${status.version ?? "unknown"}) / server: ${status.serverUrl ?? "unknown"} / items: ${status.items ?? "unknown"} / injected env (names only): ${names.length ? names.join(", ") : "none"}`;
   return { report, details: { status: status.status, version: status.version, items: status.items, injectedEnvNames: names } };
 }
@@ -74,13 +97,15 @@ async function chooseItem(ctx: UiContext, title: string): Promise<{ id: string; 
   const id = await selectInBorderedPopup(ctx, { title, items: items.map((item) => ({ value: item.id, label: item.name })), maxVisible: 16 });
   return items.find((item) => item.id === id) ?? null;
 }
+
 export default async function (pi: ExtensionAPI): Promise<void> {
   let T: Builder;
   try { T = await getBuilder(pi); } catch { return; }
   const emptySchema = T.Object({});
-  try { await core.ensureSession(); } catch {}
-  await refreshEnv();
-  pi.on("session_start", async () => { try { await core.ensureSession(); } catch {} await refreshEnv(); });
+  refreshEnv().catch(() => {});
+  // Fires on startup and every resume/fork; cache + single-flight make it free
+  // while the vault is warm.
+  pi.on("session_start", () => { void refreshEnv(); });
 
   pi.registerTool({
     name: "vw_diagnose", label: "Vaultwarden Diagnostics",

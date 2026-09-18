@@ -230,6 +230,22 @@ The `vw_add_secret` tool provides the same paste-to-create flow when requested
 by an agent. The secret is supplied by the user through a masked popup and is
 not returned in the tool result.
 
+### Startup performance and caching
+
+Secret references resolve through one batched `bw list items` call whose
+decrypted result is cached for 60 seconds, shared by the extension load path,
+every `session_start`, and the CLI. Previously each `!bw get password` entry
+spawned its own `bw` process (~3.5s on a cold CLI), so six wired secrets added
+~20 seconds to agent startup. References to deleted or renamed items are
+negative-cached for the same window instead of re-spawning a failing lookup on
+every refresh.
+
+- `PI_VAULTWARDEN_CACHE_TTL_MS` overrides the cache window (milliseconds;
+  `0` disables caching).
+- The extension hydrates the environment in the background and never blocks
+  `loadExtensions`; retries back off exponentially up to 60 seconds.
+- Create/rotate/delete operations invalidate the cache immediately.
+
 ## Diagnostics and exit codes
 
 ```bash
