@@ -313,4 +313,4 @@ for both `pi-vaultwarden` and `@piskill/pi-vaultwarden`.
 
 ## License
 
-MIT — © 2026 Daniel / EONSR
+MIT — © 2026 dinhkarate
