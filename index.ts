@@ -97,6 +97,74 @@ async function chooseItem(ctx: UiContext, title: string): Promise<{ id: string; 
   const id = await selectInBorderedPopup(ctx, { title, items: items.map((item) => ({ value: item.id, label: item.name })), maxVisible: 16 });
   return items.find((item) => item.id === id) ?? null;
 }
+type SecretPlan = { itemName: string; envName: string; purpose: string };
+
+const SECRET_MODEL_URL = process.env.PI_SECRET_MODEL_URL ?? "http://10.44.55.8:8081/v1/chat/completions";
+const SECRET_MODEL = process.env.PI_SECRET_MODEL ?? "qwen3.5-2b-q5ks";
+
+function parseSecretPlan(raw: string): SecretPlan {
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("Local Qwen returned no secret plan");
+  let parsed: unknown;
+  try { parsed = JSON.parse(match[0]); } catch { throw new Error("Local Qwen returned invalid secret plan"); }
+  const plan = parsed as Partial<SecretPlan>;
+  if (typeof plan.itemName !== "string" || !plan.itemName.trim()) throw new Error("Secret plan has no itemName");
+  if (typeof plan.envName !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(plan.envName)) throw new Error("Secret plan has invalid envName");
+  if (typeof plan.purpose !== "string" || !plan.purpose.trim()) throw new Error("Secret plan has no purpose");
+  return { itemName: plan.itemName.trim(), envName: plan.envName, purpose: plan.purpose.trim() };
+}
+
+async function inferSecretPlan(description: string): Promise<SecretPlan> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(SECRET_MODEL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: SECRET_MODEL,
+        messages: [{ role: "system", content: "Return only JSON with keys itemName, envName, purpose. Choose a concise unique Vaultwarden itemName, an uppercase UPPER_SNAKE_CASE envName, and a short purpose. Never ask for or repeat a secret value." }, { role: "user", content: description }],
+        max_tokens: 160,
+        temperature: 0,
+        stream: false,
+        enable_thinking: false,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+    });
+    if (!response.ok) throw new Error(`Local Qwen HTTP ${response.status}`);
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== "string") throw new Error("Local Qwen returned no content");
+    return parseSecretPlan(content);
+  } finally { clearTimeout(timer); }
+}
+
+function secretUsage(plan: SecretPlan): string {
+  return `Usage: getSecret("${plan.itemName}") or process.env.${plan.envName}`;
+}
+async function secretFlow(ctx: UiContext, rawDescription: string): Promise<void> {
+  const description = rawDescription.trim() || await inputInBorderedPopup(ctx, { title: "Secret purpose", prompt: "Describe the credential and which agents need it" });
+  if (!description) return;
+  try {
+    const plan = await inferSecretPlan(description);
+    const confirmed = await confirmInBorderedPopup(ctx, {
+      title: "Configure Vaultwarden secret?",
+      message: `Item: ${plan.itemName}\nVariable: ${plan.envName}\nPurpose: ${plan.purpose}\n\nThe value will be entered in a masked prompt and never sent to Qwen.`,
+    });
+    if (!confirmed) return;
+    const secret = await inputInBorderedPopup(ctx, { title: `Paste secret for ${plan.envName}`, prompt: "Value is not shown; Qwen never receives it", mask: true });
+    if (!secret) return;
+    await core.ensureSession();
+    await core.createSecretItem({ itemName: plan.itemName, secret, envName: plan.envName, notes: plan.purpose });
+    await writeBoth(plan.envName, plan.itemName);
+    await refreshEnv();
+    ctx.ui.notify(`Configured Vaultwarden item=${plan.itemName} env=${plan.envName} for omp and pi.\n${secretUsage(plan)}`, "info");
+  } catch (error) {
+    ctx.ui.notify(`Secret configuration failed: ${mappedError(error)}`, "error");
+  }
+}
 
 export default async function (pi: ExtensionAPI): Promise<void> {
   let T: Builder;
@@ -119,6 +187,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     async execute(_id, params, _signal, _update, ctx) { const input = params as { env_name: string; item_name: string; purpose: string }; const text = await addFlow(ctx, input.env_name, input.item_name, input.purpose); return { content: [{ type: "text", text }] }; },
   });
 
+  pi.registerCommand("secret", { description: "Use local Qwen to plan and configure a Vaultwarden secret for omp and pi.", handler: async (args, ctx) => { await secretFlow(ctx, args); } });
   pi.registerCommand("vaultwarden_diagnose", { description: "Show Vaultwarden status and secret injection diagnostics.", handler: async (_args, ctx) => { const result = await report(); ctx.ui.notify(result.report, "info"); } });
   pi.registerCommand("vaultwarden_add", { description: "Create and wire a new Vaultwarden secret.", handler: async (_args, ctx) => {
     const itemName = await inputInBorderedPopup(ctx, { title: "Vaultwarden item name", prompt: "Name for the new login item" }); if (!itemName) return;
@@ -132,7 +201,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   pi.registerCommand("vaultwarden_setup", { description: "Wire an existing Vaultwarden item to both agent auth stores.", handler: async (_args, ctx) => {
     try {
       await core.ensureSession(); const item = await chooseItem(ctx, "Choose Vaultwarden item"); if (!item) return;
-      const envName = await inputInBorderedPopup(ctx, { title: "Environment variable", prompt: "Use UPPER_SNAKE_CASE" }); if (!envName || !/^[A-Z][A-Z0-9_]*$/.test(envName)) { ctx.ui.notify("Invalid env var name; use UPPER_SNAKE_CASE.", "error"); return; }
+      const envName = await inputInBorderedPopup(ctx, { title: "Environment variable", prompt: "Use UPPER_SNAKE_CASE" }); if (!envName || !/^[A-Z][A-Z0-9_]*$/.test(envName)) { ctx.ui.notify("Invalid env var name; use UPPER_SNAKE_CASE", "error"); return; }
       const targets = paths(); const existing = (await core.readAuthEntries(targets.omp))[envName] !== undefined || (await core.readAuthEntries(targets.pi))[envName] !== undefined;
       let overwrite = false; if (existing) { const choice = await selectInBorderedPopup(ctx, { title: `${envName} already exists`, items: [{ value: "replace", label: "Replace" }, { value: "keep", label: "Keep" }] }); if (choice !== "replace") return; overwrite = true; }
       if (!await confirmInBorderedPopup(ctx, { title: "Save reference?", message: `"${envName}": "${core.referenceFor(item.name)}"` })) return;

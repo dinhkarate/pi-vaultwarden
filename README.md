@@ -220,12 +220,12 @@ placing plaintext values in Claude Code settings.
 
 After loading the extension:
 
+- `/secret [description]` asks local Qwen at `sanrokyu-local` to propose an item name, `UPPER_SNAKE_CASE` variable, and purpose. The secret value is entered only afterward in a masked prompt; it is never sent to Qwen. The final notification includes a usage line such as `Usage: getSecret("Item") or process.env.VARIABLE`.
 - `/vaultwarden_add` asks for item name, environment name, purpose, and a
   masked secret; it creates and wires the item.
 - `/vaultwarden_setup` searches existing items and wires a selected reference.
 - `/vaultwarden_rotate` selects an item and accepts a masked replacement.
 - `/vaultwarden_diagnose` reports status and injected names.
-
 The `vw_add_secret` tool provides the same paste-to-create flow when requested
 by an agent. The secret is supplied by the user through a masked popup and is
 not returned in the tool result.
