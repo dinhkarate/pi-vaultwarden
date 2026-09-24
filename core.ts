@@ -61,11 +61,12 @@ export async function bw(args: string[], opts: { input?: string; session?: strin
 // Secrets are resolved through one batched `bw list items` call instead of
 // spawning a ~3.5s `bw get password` process per auth entry. The map and the
 // unlocked-session check share the same TTL so repeated startup/resume passes
-// cost nothing until the window expires.
+// cost nothing until the window expires. Default to one week; set
+// PI_VAULTWARDEN_CACHE_TTL_MS to override per process.
 export const SECRET_CACHE_TTL_MS = (() => {
   const raw = process.env.PI_VAULTWARDEN_CACHE_TTL_MS;
   const parsed = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 60000;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 7 * 24 * 60 * 60 * 1000;
 })();
 
 let vaultCache: { at: number; map: Map<string, string> } | null = null;

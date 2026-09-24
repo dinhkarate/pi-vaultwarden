@@ -233,7 +233,7 @@ not returned in the tool result.
 ### Startup performance and caching
 
 Secret references resolve through one batched `bw list items` call whose
-decrypted result is cached for 60 seconds, shared by the extension load path,
+decrypted result is cached for 7 days by default, shared by the extension load path,
 every `session_start`, and the CLI. Previously each `!bw get password` entry
 spawned its own `bw` process (~3.5s on a cold CLI), so six wired secrets added
 ~20 seconds to agent startup. References to deleted or renamed items are
