@@ -242,8 +242,8 @@ every refresh.
 
 - `PI_VAULTWARDEN_CACHE_TTL_MS` overrides the cache window (milliseconds;
   `0` disables caching).
-- The extension hydrates the environment in the background and never blocks
-  `loadExtensions`; retries back off exponentially up to 60 seconds.
+- The extension hydrates the environment before completing extension startup,
+  so `$CUSTOM_ENV_VAR` API-key references are available before provider auth resolution. Resume/fork refreshes remain background and retry exponentially up to 60 seconds.
 - Create/rotate/delete operations invalidate the cache immediately.
 
 ## Diagnostics and exit codes

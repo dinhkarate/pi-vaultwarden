@@ -75,7 +75,7 @@ let vaultMisses: Map<string, number> | null = null;
 let sessionPending: Promise<string> | null = null;
 let sessionVerifiedAt = 0;
 
-const BW_GET_PASSWORD_RE = /^bw\s+get\s+password\s+'([^']+)'\s*$/;
+const BW_GET_PASSWORD_RE = /^(?:bw\s+get\s+password|(?:[^\s]*\/)?bw-get)\s+'([^']+)'\s*$/;
 
 function normalizeItemName(name: string): string { return name.trim().toLowerCase(); }
 export function invalidateSecretCache(): void {
