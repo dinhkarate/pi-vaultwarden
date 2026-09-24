@@ -170,7 +170,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   let T: Builder;
   try { T = await getBuilder(pi); } catch { return; }
   const emptySchema = T.Object({});
-  refreshEnv().catch(() => {});
+  await refreshEnv();
   // Fires on startup and every resume/fork; cache + single-flight make it free
   // while the vault is warm.
   pi.on("session_start", () => { void refreshEnv(); });
